@@ -321,7 +321,7 @@ ngx_int_t ngx_http_small_light_imagemagick_process(ngx_http_request_t *r, ngx_ht
     }
 
     /* Add DPI */
-    if (sz.dpi != 0) {
+    if (sz.dpi > 0) {
         MagickSetResolution(ictx->wand, sz.dpi, sz.dpi);
         MagickSetImageUnits(ictx->wand, PixelsPerInchResolution);
     }
