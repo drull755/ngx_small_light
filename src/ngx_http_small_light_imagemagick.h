@@ -27,6 +27,18 @@
 
 #include "ngx_http_small_light_module.h"
 
+/**
+ * Maximum number of image profiles(exif, iptc, icc, 8bim, xmp, ...)
+ * preserved across the conversion when 'keepprof' is enabled.
+ */
+#define NGX_HTTP_SMALL_LIGHT_MAX_PROFILES 8
+
+typedef struct {
+    char *name;
+    unsigned char *blob;
+    size_t len;
+} ngx_http_small_light_profile_t;
+
 typedef struct {
     u_char *image;
     size_t image_len;

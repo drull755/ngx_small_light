@@ -273,6 +273,7 @@ when Content-Length is not set in response headers.
 |cmyk2rgb   |char  |n          |convert colorspace from CMYK to sRGB (y, n)     |        :o:|   :x:|:x:|
 |rmprof     |char  |n          |remove profile (y, n)                           |        :o:|   :x:|:x:|
 |autoorient |char  |n          |enable adjust image orientation automatically (y, n)  |  :o:|   :x:|:x:|
+|keepprof   |char  |n          |keep profiles (exif, iptc, icc, ...) (y, n)      |        :o:|   :x:|:x:|
 
 The values of `da` are `l` and `s` and `n`. These present the meanings below.
 
@@ -284,6 +285,7 @@ There are any limitations below.
 
  * `of=gif` and `of=webp` are not supported when `e=imlib2`.
  * `autoorient` is available ImageMagick-6.9.0 or later.
+ * `keepprof` is ignored when `rmprof=y` is given.
  * The value of `radius,sigma` for `sharpen` and `unsharp` and `blur` is limited by `small_light_radius_max` and `small_light_sigma_max`.
 
 There are the types of each parameter below.
@@ -295,6 +297,36 @@ There are the types of each parameter below.
 |number|integer number                                   |
 |color |rrggbb or rrggbbaa                               |
 |string|string                                           |
+
+### keepprof
+
+ImageMagick normally carries the profiles of the source image over to the output
+image, so the metadata usually survives a format conversion such as
+`of=jpg` applied to a WebP source. However some code paths build a brand-new
+image instead of transforming the source one, and those lose every profile.
+Composing the image onto a canvas (`cw` and `ch`) is the notable example.
+
+`keepprof=y` stashes the profiles (`exif`, `iptc`, `icc`, `8bim`, `xmp`, ...)
+right after the source image is read and puts back the ones that got dropped
+just before the output image is written. Profiles which are still carried by the
+image are left untouched, because ImageMagick keeps them in sync with the
+transformations it performed while the stashed copies describe the source image
+only.
+
+There are some points to note.
+
+ * The metadata can only be preserved as far as both the source and the
+   destination format can hold it. A WebP container has no place for IPTC at
+   all, so IPTC is already gone before the request reaches nginx when the source
+   is a WebP image.
+ * Reading the metadata of a WebP source requires a reasonably recent
+   ImageMagick. Older ImageMagick-6 releases ignore the `EXIF` chunk of a WebP
+   image entirely.
+ * ImageMagick does not update the dimension tags of the EXIF profile
+   (`ExifImageWidth` and `ExifImageHeight`) on resizing, so they keep describing
+   the source image.
+ * The EXIF profile of the source image may contain a thumbnail, which makes the
+   output image larger.
 
 ## Named Pattern
 

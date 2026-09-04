@@ -111,9 +111,13 @@ ngx_int_t ngx_http_small_light_imagemagick_process(ngx_http_request_t *r, ngx_ht
     ngx_int_t                               type;
     u_char                                  jpeg_size_opt[32], crop_geo[128], size_geo[128], embedicon_path[256];
     ColorspaceType                          color_space;
-#if MagickLibVersion >= 0x690
-    int                                     autoorient_flg;
-#endif
+    int                                     autoorient_flg, keepprof_flg;
+    ngx_http_small_light_profile_t          profs[NGX_HTTP_SMALL_LIGHT_MAX_PROFILES];
+    ngx_uint_t                              prof_num, pi;
+    size_t                                  prof_cnt, prof_len, prof_name_len;
+    char                                  **prof_names;
+    unsigned char                          *prof_blob;
+    OrientationType                         orientation_orig;
 
     status = MagickFalse;
 
@@ -160,9 +164,78 @@ ngx_int_t ngx_http_small_light_imagemagick_process(ngx_http_request_t *r, ngx_ht
         }
     }
 
+    /*
+     * preserve profiles(exif, iptc, icc, 8bim, xmp, ...) across the conversion.
+     * some code paths below(the canvas one especially) replace the wand with a
+     * freshly created image, which carries no profile at all. so the profiles
+     * are stashed here and restored just before the image is written out.
+     * 'rmprof' wins over 'keepprof'.
+     */
+    prof_num         = 0;
+    orientation_orig = UndefinedOrientation;
+    keepprof_flg     = ngx_http_small_light_parse_flag(NGX_HTTP_SMALL_LIGHT_PARAM_GET_LIT(&ctx->hash, "keepprof"));
+    if (keepprof_flg != 0 && rmprof_flg == 0) {
+        orientation_orig = MagickGetImageOrientation(ictx->wand);
+        prof_cnt   = 0;
+        prof_names = MagickGetImageProfiles(ictx->wand, "*", &prof_cnt);
+        if (prof_names != NULL) {
+            for (pi = 0; pi < prof_cnt; pi++) {
+                if (prof_num >= NGX_HTTP_SMALL_LIGHT_MAX_PROFILES) {
+                    ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                                  "too many profiles to preserve. maximum value is %d %s:%d",
+                                  NGX_HTTP_SMALL_LIGHT_MAX_PROFILES,
+                                  __FUNCTION__,
+                                  __LINE__);
+                    break;
+                }
+
+                prof_len  = 0;
+                prof_blob = MagickGetImageProfile(ictx->wand, prof_names[pi], &prof_len);
+                if (prof_blob == NULL) {
+                    continue;
+                }
+
+                if (prof_len == 0) {
+                    MagickRelinquishMemory(prof_blob);
+                    continue;
+                }
+
+                /*
+                 * copy the profile into the request pool so that it is released
+                 * together with the request even on the error paths below.
+                 */
+                prof_name_len          = ngx_strlen(prof_names[pi]);
+                profs[prof_num].name   = ngx_pnalloc(r->pool, prof_name_len + 1);
+                profs[prof_num].blob   = ngx_pnalloc(r->pool, prof_len);
+                if (profs[prof_num].name == NULL || profs[prof_num].blob == NULL) {
+                    MagickRelinquishMemory(prof_blob);
+                    ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                                  "failed to allocate memory for profile:%s %s:%d",
+                                  prof_names[pi],
+                                  __FUNCTION__,
+                                  __LINE__);
+                    break;
+                }
+
+                ngx_memcpy(profs[prof_num].name, prof_names[pi], prof_name_len + 1);
+                ngx_memcpy(profs[prof_num].blob, prof_blob, prof_len);
+                profs[prof_num].len = prof_len;
+                prof_num++;
+
+                MagickRelinquishMemory(prof_blob);
+            }
+
+            for (pi = 0; pi < prof_cnt; pi++) {
+                MagickRelinquishMemory(prof_names[pi]);
+            }
+            MagickRelinquishMemory(prof_names);
+        }
+    }
+
     of_orig = MagickGetImageFormat(ictx->wand);
     status = MagickTrue;
 
+    autoorient_flg = 0;
 #if MagickLibVersion >= 0x690
     /* auto-orient */
     autoorient_flg = ngx_http_small_light_parse_flag(NGX_HTTP_SMALL_LIGHT_PARAM_GET_LIT(&ctx->hash, "autoorient"));
@@ -504,6 +577,39 @@ ngx_int_t ngx_http_small_light_imagemagick_process(ngx_http_request_t *r, ngx_ht
     }
 
     DestroyString(of_orig);
+
+    /*
+     * restore the profiles dropped along the way. profiles still carried by the
+     * wand are left untouched, since ImageMagick keeps them in sync with the
+     * transformations it applied(auto-orient rewrites the EXIF orientation for
+     * instance), while the stashed copies reflect the source image only.
+     */
+    for (pi = 0; pi < prof_num; pi++) {
+        prof_len  = 0;
+        prof_blob = MagickGetImageProfile(ictx->wand, profs[pi].name, &prof_len);
+        if (prof_blob != NULL) {
+            MagickRelinquishMemory(prof_blob);
+            continue;
+        }
+
+        status = MagickSetImageProfile(ictx->wand, profs[pi].name, profs[pi].blob, profs[pi].len);
+        if (status == MagickFalse) {
+            ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                          "failed to restore profile:%s %s:%d",
+                          profs[pi].name,
+                          __FUNCTION__,
+                          __LINE__);
+        }
+    }
+
+    if (prof_num > 0) {
+        /*
+         * ImageMagick syncs the EXIF orientation tag with the image orientation
+         * on write, so the orientation has to follow the restored profile.
+         */
+        MagickSetImageOrientation(ictx->wand,
+                                  autoorient_flg != 0 ? TopLeftOrientation : orientation_orig);
+    }
 
     ctx->content        = MagickGetImageBlob(ictx->wand, &sled_image_size);
     ctx->content_length = sled_image_size;
